@@ -1,0 +1,104 @@
+name: UploadService CI
+
+on:
+  push:
+    branches: [main, develop]
+    paths: ['UploadService/**']
+  pull_request:
+    branches: [main]
+    paths: ['UploadService/**']
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/fiapx-upload-service
+
+jobs:
+  test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: fiapx
+          POSTGRES_PASSWORD: fiapx@2024
+          POSTGRES_DB: fiapx_upload_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s --health-timeout 5s --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        working-directory: UploadService
+        run: dotnet restore
+
+      - name: Build
+        working-directory: UploadService
+        run: dotnet build --no-restore -c Release
+
+      - name: Unit Tests
+        working-directory: UploadService
+        run: |
+          dotnet test tests/UploadService.UnitTests \
+            --no-build -c Release \
+            --collect:"XPlat Code Coverage" \
+            --results-directory coverage \
+            -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=cobertura
+
+      - name: Integration Tests
+        working-directory: UploadService
+        run: dotnet test tests/UploadService.IntegrationTests --no-build -c Release
+
+      - name: Coverage Gate (≥80%)
+        uses: irongut/CodeCoverageSummary@v1.3.0
+        with:
+          filename: '**/coverage.cobertura.xml'
+          badge: true
+          fail_below_min: true
+          format: markdown
+          thresholds: '80 90'
+          output: both
+
+  docker:
+    name: Docker Build & Push
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - uses: docker/build-push-action@v5
+        with:
+          context: UploadService
+          file: UploadService/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

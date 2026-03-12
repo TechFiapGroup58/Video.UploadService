@@ -1,0 +1,117 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: upload-service
+  namespace: fiapx
+  labels:
+    app: upload-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: upload-service
+  template:
+    metadata:
+      labels:
+        app: upload-service
+    spec:
+      containers:
+        - name: upload-service
+          image: ghcr.io/SEU_ORG/fiapx-upload-service:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: ConnectionStrings__DefaultConnection
+              valueFrom:
+                secretKeyRef:
+                  name: upload-service-secrets
+                  key: connection-string
+            - name: Jwt__SecretKey
+              valueFrom:
+                secretKeyRef:
+                  name: upload-service-secrets
+                  key: jwt-secret-key
+            - name: Jwt__Issuer
+              value: "fiapx-auth"
+            - name: Jwt__Audience
+              value: "fiapx-services"
+            - name: Minio__Endpoint
+              value: "minio-service:9000"
+            - name: Minio__AccessKey
+              valueFrom:
+                secretKeyRef:
+                  name: upload-service-secrets
+                  key: minio-access-key
+            - name: Minio__SecretKey
+              valueFrom:
+                secretKeyRef:
+                  name: upload-service-secrets
+                  key: minio-secret-key
+            - name: Minio__BucketName
+              value: "videos"
+            - name: Minio__UseSSL
+              value: "false"
+            - name: RabbitMq__Host
+              value: "rabbitmq-service"
+            - name: RabbitMq__Port
+              value: "5672"
+            - name: RabbitMq__Username
+              value: "fiapx"
+            - name: RabbitMq__Password
+              valueFrom:
+                secretKeyRef:
+                  name: upload-service-secrets
+                  key: rabbitmq-password
+            - name: ASPNETCORE_ENVIRONMENT
+              value: "Production"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: upload-service
+  namespace: fiapx
+spec:
+  selector:
+    app: upload-service
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: upload-service-hpa
+  namespace: fiapx
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: upload-service
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

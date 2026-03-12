@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>UploadService</RootNamespace>
+    <InternalsVisibleTo>UploadService.Tests</InternalsVisibleTo>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="AWSSDK.S3"                                         Version="3.7.309.3" />
+    <PackageReference Include="AspNetCore.HealthChecks.NpgSql"                    Version="8.0.1" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer"     Version="8.0.0" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design"              Version="8.0.0">
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL"             Version="8.0.0" />
+    <PackageReference Include="RabbitMQ.Client"                                   Version="6.8.1" />
+    <PackageReference Include="Swashbuckle.AspNetCore"                            Version="6.6.2" />
+  </ItemGroup>
+</Project>

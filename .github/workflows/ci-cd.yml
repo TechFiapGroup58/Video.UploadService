@@ -1,0 +1,223 @@
+name: UploadService CI/CD
+
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │  FLUXO DE BRANCHES                                                      │
+# │                                                                         │
+# │  feature/* ──PR──► develop   gate: cobertura ≥ 80% + 1 aprovação       │
+# │                               → auto-merge se gate passar               │
+# │                                                                         │
+# │  develop   ──PR──► main      gate: cobertura ≥ 80%                     │
+# │                               → auto-merge se gate passar               │
+# │                               → build Docker + deploy K8s               │
+# └─────────────────────────────────────────────────────────────────────────┘
+
+on:
+  pull_request:
+    branches: [develop, main]
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+
+env:
+  REGISTRY:   ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/fiapx-upload-service
+  DOTNET_VER: "8.0.x"
+
+jobs:
+
+  # ── 1. BUILD + TESTES + COBERTURA ─────────────────────────────────────────
+  test:
+    name: Test & Coverage Gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET ${{ env.DOTNET_VER }}
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VER }}
+
+      - name: Restore
+        working-directory: UploadService
+        run: dotnet restore
+
+      - name: Build
+        working-directory: UploadService
+        run: dotnet build --no-restore -c Release
+
+      - name: Unit Tests + Coverage
+        working-directory: UploadService
+        run: |
+          dotnet test tests/UploadService.Tests.csproj \
+            --no-build -c Release \
+            --filter "FullyQualifiedName~Unit" \
+            --collect:"XPlat Code Coverage" \
+            --results-directory ./coverage \
+            -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=cobertura
+
+      - name: Integration Tests
+        working-directory: UploadService
+        run: |
+          dotnet test tests/UploadService.Tests.csproj \
+            --no-build -c Release \
+            --filter "FullyQualifiedName~Integration"
+
+      # Falha o job inteiro se cobertura < 80%
+      - name: Coverage Gate >= 80%
+        id: gate
+        uses: irongut/CodeCoverageSummary@v1.3.0
+        with:
+          filename:       "UploadService/coverage/**/coverage.cobertura.xml"
+          badge:          true
+          fail_below_min: true
+          format:         markdown
+          thresholds:     "80 90"
+          output:         both
+
+      - name: Comment coverage on PR
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          recreate: true
+          path: code-coverage-results.md
+
+  # ── 2. AUTO-MERGE: feature/* → develop ────────────────────────────────────
+  #   Exige: cobertura >= 80% (job test) + pelo menos 1 aprovação no PR
+  auto-merge-to-develop:
+    name: Auto-merge feature to develop
+    runs-on: ubuntu-latest
+    needs: test
+    if: |
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.base.ref == 'develop'
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check PR has at least 1 approval
+        id: approval
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          APPROVED=$(gh pr view "$PR_NUMBER" --json reviews \
+            --jq '[.reviews[] | select(.state == "APPROVED")] | length')
+          echo "count=$APPROVED" >> $GITHUB_OUTPUT
+          echo "Approvals found: $APPROVED"
+
+      - name: Merge (squash) — coverage OK + approved
+        if: steps.approval.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr merge "$PR_NUMBER" \
+            --squash \
+            --auto \
+            --subject "feat: auto-merge feature into develop" \
+            --delete-branch
+
+      - name: Waiting for approval
+        if: steps.approval.outputs.count == '0'
+        run: echo "Coverage OK. Waiting for PR approval to auto-merge."
+
+  # ── 3. AUTO-MERGE: develop → main ─────────────────────────────────────────
+  #   Exige: apenas cobertura >= 80% (sem aprovação manual obrigatória)
+  auto-merge-to-main:
+    name: Auto-merge develop to main
+    runs-on: ubuntu-latest
+    needs: test
+    if: |
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.ref == 'develop'
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Merge (merge commit) — coverage OK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr merge "$PR_NUMBER" \
+            --merge \
+            --auto \
+            --subject "release: auto-merge develop into main"
+
+  # ── 4. DOCKER BUILD & PUSH ────────────────────────────────────────────────
+  docker:
+    name: Docker Build & Push
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=true
+
+      - uses: docker/build-push-action@v5
+        with:
+          context:    UploadService
+          file:       UploadService/Dockerfile
+          push:       true
+          tags:       ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+
+  # ── 5. DEPLOY KUBERNETES ──────────────────────────────────────────────────
+  deploy:
+    name: Deploy to Kubernetes
+    runs-on: ubuntu-latest
+    needs: docker
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: tag
+        run: echo "TAG=sha-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - uses: azure/setup-kubectl@v3
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" > ~/.kube/config
+
+      - name: Apply manifests
+        run: kubectl apply -f UploadService/k8s/
+
+      - name: Update image
+        run: |
+          kubectl set image deployment/upload-service \
+            upload-service=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.TAG }} \
+            -n fiapx
+
+      - name: Rollout status
+        run: kubectl rollout status deployment/upload-service -n fiapx --timeout=120s
